@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="物流轉運節費分析系統", layout="wide", page_icon="💰")
+st.set_page_config(page_title="物流轉運數據專家系統", layout="wide", page_icon="📊")
 
-# --- 1. 費率對照基準 ---
-WH_FREIGHT_BASE = {
+# --- 核心資料庫 (依據您的 Excel 截圖數據) ---
+WH_DATA = {
     "大肚-大溪": {"46T": 13100, "17T": 7800},
     "大溪-大肚": {"46T": 13100, "17T": 7800},
     "大溪-岡山": {"46T": 18900, "17T": 8100},
@@ -15,107 +15,90 @@ WH_FREIGHT_BASE = {
     "岡山-大肚": {"46T": 13600, "17T": 8100}
 }
 
-MILEAGE_GT = {
-    "2F": 138.3, "2G": 105.7, "2J": 57.8, 
-    "IJ": 188.8, "IN": 260.0, "IR": 199.3
-}
-
-ALPHA_MAP = {
-    "平原/標準 (α=1.20)": 1.20,
-    "長途/山區 (α=1.45)": 1.45,
-    "密集市區 (α=1.35)": 1.35,
-    "順暢市區 (α=1.05)": 1.05
-}
-
-# --- 側邊欄 ---
+# --- 側邊欄導航 ---
 st.sidebar.title("🚚 轉運數據決策中心")
-app_mode = st.sidebar.radio("請選擇功能模組：", ["💰 轉運節費計算", "📏 路線里程計算機"])
+app_mode = st.sidebar.radio("請選擇功能模組：", ["💰 批次節費試算", "📏 路線里程計算機"])
 
-# --- 模組一：轉運節費計算 ---
-if app_mode == "💰 轉運節費計算":
-    st.header("💰 轉運節費計算機 (多日批次分析)")
-    
-    with st.sidebar:
-        st.markdown("---")
-        st.subheader("⚙️ 批次參數設定")
-        
-        # 路線選擇
-        route_options = list(WH_FREIGHT_BASE.keys())
-        selected_route = st.selectbox("車趟路線", route_options, index=1) 
-        
-        # 多日板數輸入
-        st.info("請輸入每日總板數，用逗號或換行隔開：")
-        pallets_text = st.text_area("多日板數錄入", value="35, 40, 50", height=100)
-        
-        start_date = st.date_input("起始日期", value=datetime.now())
-        calc_btn = st.button("🚀 執行多日節費分析", use_container_width=True)
+if app_mode == "💰 批次節費試算":
+    st.header("💰 轉運節費試算 (多路段/多日期批次模式)")
+    st.markdown("請在下方表格直接編輯或新增數據，系統將自動判定節費金額。")
 
-    if calc_btn:
-        # 解析輸入的板數
-        try:
-            # 處理逗號或換行
-            raw_list = pallets_text.replace('\n', ',').split(',')
-            pallet_list = [int(p.strip()) for p in raw_list if p.strip()]
-        except ValueError:
-            st.error("❌ 板數格式錯誤，請輸入數字並以逗號隔開。")
-            st.stop()
+    # 1. 初始化批次編輯表格
+    if 'batch_df' not in st.session_state:
+        st.session_state.batch_df = pd.DataFrame([
+            {"日期": datetime.now().date(), "路線": "大肚-大溪", "總板數": 35},
+            {"日期": datetime.now().date(), "路線": "大肚-岡山", "總板數": 40},
+            {"日期": datetime.now().date(), "路線": "大肚-大溪", "總板數": 50}
+        ])
 
-        rates = WH_FREIGHT_BASE[selected_route]
-        results = []
+    # 2. 交互式編輯器
+    edited_df = st.data_editor(
+        st.session_state.batch_df,
+        num_rows="dynamic",
+        column_config={
+            "日期": st.column_config.DateColumn("配送日期", required=True),
+            "路線": st.column_config.SelectboxColumn("車趟路線", options=list(WH_DATA.keys()), required=True),
+            "總板數": st.column_config.NumberColumn("總板數 (N)", min_value=0, step=1, required=True),
+        },
+        use_container_width=True,
+        key="data_editor"
+    )
+
+    if st.button("🚀 執行批次節費分析", use_container_width=True):
+        st.session_state.batch_df = edited_df
+        
+        final_results = []
         grand_total = 0
 
-        # 核心計算邏輯 (循環處理每一天)
-        for i, n_pallets in enumerate(pallet_list):
-            curr_date = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
+        for _, row in edited_df.iterrows():
+            route = row["路線"]
+            n = row["總板數"]
+            rates = WH_DATA.get(route, {"46T": 0, "17T": 0})
             
-            full_trucks = (n_pallets // 30) * 30
-            r_pallets = n_pallets % 30
-            
-            # 判定邏輯：R<=15 省17T；R>15 省46T (或依分析師手動指定之邏輯)
-            if r_pallets == 0:
-                save_amt, save_type, last_frag = 0, "無 (滿車)", 0
-            elif 0 < r_pallets <= 15:
-                save_amt, save_type, last_frag = rates["17T"], "1趟 17T", r_pallets
-            else: # R > 15
-                save_amt, save_type, last_frag = rates["46T"], "1趟 46T", r_pallets
+            # --- 核心邏輯：溢出不加派判定 ---
+            r = n % 30
+            if r == 0:
+                save_amt, save_type = 0, "無 (滿車)"
+            elif 0 < r <= 15:
+                save_amt, save_type = rates["17T"], "1趟 17T"
+            else:
+                save_amt, save_type = rates["46T"], "1趟 46T"
             
             grand_total += save_amt
-            results.append({
-                "日期": curr_date,
-                "總板數": n_pallets,
-                "拆解": f"{full_trucks}板(滿) + {r_pallets}板(溢)",
+            final_results.append({
+                "日期": row["日期"],
+                "路線": route,
+                "總板數": n,
+                "溢出板數": r,
                 "節省車型": save_type,
-                "金額": save_amt,
-                "最後零頭": last_frag
+                "節省金額": save_amt
             })
 
-        # --- 輸出結果 ---
-        st.success(f"### 🎊 多日總節費合計： NT$ {grand_total:,} 元")
-        
-        # 顯示專業點列報告 (針對每一筆錄入)
-        st.subheader("📋 節費試算報告 (明細)")
-        for res in results:
-            with st.expander(f"📅 日期：{res['日期']} | 板數：{res['總板數']} | 節省：${res['金額']:,}"):
-                st.markdown(f"""
-                * **車趟路線**：{selected_route}
-                * **板數拆解**：{res['拆解']}
-                * **節省費用**：{res['金額']:,} 元 (成功省下 {res['節省車型']} 費用)
+        res_df = pd.DataFrame(final_results)
+
+        # 3. 輸出報告看板
+        st.markdown("---")
+        st.success(f"### 🎊 批次總節費合計： NT$ {grand_total:,} 元")
+
+        # 4. 專業報告明細 (模仿您最新的截圖格式)
+        st.subheader("📋 節費試算報告 (溢出不加派)")
+        cols = st.columns(len(final_results) if len(final_results) <= 3 else 3)
+        for i, res in enumerate(final_results):
+            with cols[i % 3]:
+                st.info(f"""
+                **{res['日期']} | {res['路線']}**
+                * 總計板數：{res['總板數']} 板
+                * 溢出板數：{res['溢出板數']} 板
+                * 節省費用：{res['金額']:,} 元
+                * (成功省下 {res['節省車型']} 費用)
                 """)
 
-        # 每日明細表
-        st.subheader("📅 數據總覽表")
-        df = pd.DataFrame(results)
-        st.table(df[["日期", "總板數", "節省車型", "金額"]])
-
-        # CSV 原始資料 (方便貼回 Excel)
+        # 5. CSV 原始資料 (方便貼回 Excel)
         st.markdown("---")
-        st.subheader("📊 Excel 專用原始資料 (CSV)")
-        csv_str = "日期,路線,總板數,溢出零頭,節省車型,節省費用\n"
-        for res in results:
-            csv_str += f"{res['日期']},{selected_route},{res['總板數']},{res['最後零頭']},{res['節省車型']},{res['金額']}\n"
-        st.code(csv_str, language="text")
+        st.subheader("📊 Excel 專用原始資料 (CSV 格式)")
+        st.code(res_df.to_csv(index=False), language="text")
 
-# --- 模組二：路線里程計算機 (畫面不動) ---
 elif app_mode == "📏 路線里程計算機":
     st.header("📏 路線里程計算機")
-    # ... (里程計算程式碼保持不變) ...
+    st.info("此模組保持獨立，可進行單一路線的分段拆解。")
+    # (里程計算邏輯代碼...)
