@@ -1,25 +1,22 @@
 import streamlit as st
 import pandas as pd
-import datetime
+from datetime import datetime, timedelta
 
 # --- 網頁配置 ---
-st.set_page_config(page_title="物流路網數據專家系統", layout="wide", page_icon="🚚")
+st.set_page_config(page_title="轉運節費計算機", layout="wide", page_icon="🚚")
 
-# --- 核心資料庫設定 ---
-# 1. 運費費率 (節費分析用)
+# --- 核心資料庫 ---
 FREIGHT_RATES = {
     "大肚 - 大溪": {"46T": 13100, "17T": 7800},
     "大溪 - 岡山": {"46T": 18900, "17T": 8100},
     "大肚 - 岡山": {"46T": 13600, "17T": 8100}
 }
 
-# 2. 里程實測確值 (Ground Truth)
 MILEAGE_GT = {
     "2F": 138.3, "2G": 105.7, "2J": 57.8, 
     "IJ": 188.8, "IN": 260.0, "IR": 199.3
 }
 
-# 3. 里程補償係數 (α)
 ALPHA_MAP = {
     "平原/標準 (α=1.20)": 1.20,
     "長途/山區 (α=1.45)": 1.45,
@@ -27,74 +24,88 @@ ALPHA_MAP = {
     "順暢市區 (α=1.05)": 1.05
 }
 
-# --- 側邊欄選單 ---
-st.sidebar.title("🚛 物流數據決策中心")
-mode = st.sidebar.radio("請選擇功能模組：", ["📏 智慧里程估算", "💰 運費節費分析"])
+# --- 側邊欄：功能導航與設定 ---
+st.sidebar.title("🚚 轉運數據決策中心")
+app_mode = st.sidebar.radio("請選擇功能模組：", ["💰 轉運節費計算", "📏 智慧里程估算"])
 
-# --- 模組一：智慧里程估算 (含分段拆解) ---
-if mode == "📏 智慧里程估算":
-    st.header("📏 配送里程自動估算 (含分段拆解)")
-    st.info("💡 操作說明：輸入代碼並貼上店名。若是已知實測路線，系統會自動帶入正確里程。")
-
-    col_in, col_res = st.columns([1, 1.2])
+# --- 模組一：轉運節費計算 (含多天合計) ---
+if app_mode == "💰 轉運節費計算":
+    st.header("💰 轉運節費計算機")
+    st.info("計算優化溢出板數所省下的派車費用。")
     
-    with col_in:
-        st.subheader("📍 數據輸入")
-        route_code = st.text_input("路線代碼 (如: 2G)", value="2G").upper().strip()
-        zone_type = st.selectbox("區域屬性 (判定 α)", list(ALPHA_MAP.keys()))
-        raw_stores = st.text_area("請在此處貼上店名清單 (每行一店)", height=250, placeholder="直接從 Excel 貼上...")
-        
-        # 自動判定：實測路線隱藏輸入框
-        if route_code in MILEAGE_GT:
-            st.success(f"偵測到實測路線 {route_code}：{MILEAGE_GT[route_code]} km")
-            google_dist = 0.0
-        else:
-            google_dist = st.number_input("請輸入 Google Map 總里程 (D_map)", min_value=0.0, value=0.0)
-        
-        calculate_btn = st.button("🚀 生成分段報告")
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("⚙️ 節費參數")
+        route_sel = st.selectbox("選擇配送路線", list(FREIGHT_RATES.keys()))
+        today = datetime.now()
+        date_range = st.date_input("選擇計算日期區間", value=(today, today))
+        avg_pallets = st.number_input("每日平均板數 (N)", min_value=0, value=31)
+        calc_saving = st.button("🚀 執行合計分析", use_container_width=True)
 
-    if calculate_btn:
+    if calc_saving:
+        # 日期邏輯處理
+        try:
+            start_date, end_date = date_range if isinstance(date_range, tuple) else (date_range, date_range)
+        except:
+            st.error("請選擇完整的日期區間（點選開始日與結束日）"); st.stop()
+            
+        days = (end_date - start_date).days + 1
+        daily_val = FREIGHT_RATES[route_sel]["17T"]
+        total_val = daily_val * days
+
+        # 總合計看板
+        st.success(f"## 🎊 總節費合計： NT$ {total_val:,} 元")
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("統計天數", f"{days} 天")
+        c2.metric("路線", route_sel)
+        c3.metric("每日節省", f"${daily_val:,}")
+
+        # 明細表
+        st.subheader("📅 每日明細清單")
+        date_list = [(start_date + timedelta(days=x)).strftime('%Y-%m-%d') for x in range(days)]
+        df_save = pd.DataFrame({
+            "項次": range(1, days + 1),
+            "日期": date_list,
+            "狀態": ["✅ 成功節省 0.5 趟 17T"] * days,
+            "節省金額": [f"${daily_val:,}"] * days
+        })
+        st.table(df_save)
+
+# --- 模組二：智慧里程估算 (閉環分段版) ---
+elif app_mode == "📏 智慧里程估算":
+    st.header("📏 智慧里程估算 (含分段拆解)")
+    
+    col_in, col_res = st.columns([1, 1.2])
+    with col_in:
+        route_code = st.text_input("路線代碼 (如: 2G)", value="2G").upper().strip()
+        zone_type = st.selectbox("區域屬性 (α)", list(ALPHA_MAP.keys()))
+        raw_stores = st.text_area("請貼上店名清單", height=200)
+        
+        is_known = route_code in MILEAGE_GT
+        if is_known:
+            st.success(f"已帶入實測值: {MILEAGE_GT[route_code]} km")
+            google_km = 0.0
+        else:
+            google_km = st.number_input("Google Map 總里程 (未輸入則依店數預估)", min_value=0.0, value=0.0)
+        
+        calc_dist = st.button("🚀 生成分段報告")
+
+    if calc_dist:
         store_list = [s.strip() for s in raw_stores.split("\n") if s.strip()]
-        num_stores = len(store_list)
+        n = len(store_list)
         alpha = ALPHA_MAP[zone_type]
         
-        # 決定總里程
-        final_total = MILEAGE_GT[route_code] if route_code in MILEAGE_GT else round(google_dist * alpha, 1)
-        
-        # 分段拆解邏輯：平均分配總里程
-        avg_segment = round(final_total / (num_stores + 1), 1) if num_stores > 0 else 0
+        total_dist = MILEAGE_GT[route_code] if is_known else (google_km * alpha if google_km > 0 else (n+1)*15*alpha)
+        avg_seg = round(total_dist / (n + 1), 1) if n > 0 else 0
 
         with col_res:
-            st.subheader(f"📊 {route_code} 配送分析")
-            st.metric("預估總里程", f"{final_total} km", delta=f"數據狀態: {'實測' if route_code in MILEAGE_GT else '預估'}")
+            st.subheader(f"📊 {route_code} 報告結果")
+            st.metric("配送總里程", f"{round(total_dist,1)} km")
             
-            # 建立表格
-            table_data = [["0", "起點", "全台大肚倉", "0.0"]]
+            table_data = [["0", "起點", "大肚倉", "0.0"]]
             for i, name in enumerate(store_list, 1):
-                table_data.append([str(i), f"第 {i} 站", name, f"{avg_segment}"])
+                table_data.append([str(i), f"第 {i} 站", name, f"{avg_seg}"])
+            table_data.append([str(n+1), "回場", "大肚倉", f"{round(total_dist - avg_seg*n, 1)}"])
             
-            # 回場計算 (確保總數正確)
-            return_dist = round(final_total - (avg_segment * num_stores), 1)
-            table_data.append([str(num_stores + 1), "回場", "全台大肚倉", f"{max(0, return_dist)}"])
-            
-            st.table(pd.DataFrame(table_data, columns=["Index", "路順", "店名", "分段里程(km)"]))
-            st.caption(f"註：分段里程係依據總里程進行平均拆解供參考。")
-
-# --- 模組二：運費節費分析 ---
-elif mode == "💰 運費節費分析":
-    st.header("💰 溢出板數節費試算")
-    st.info("計算因「不加派」溢出板數所省下的運費。")
-    
-    route = st.selectbox("車趟路線", list(FREIGHT_RATES.keys()))
-    total_pallets = st.number_input("總計板數 (N)", min_value=0, value=31)
-    
-    if st.button("執行節費分析"):
-        price_17t = FREIGHT_RATES[route]["17T"]
-        remainder = total_pallets % 30
-        savings = price_17t if remainder > 0 else 0
-        
-        res1, res2 = st.columns(2)
-        res1.metric("總板數", f"{total_pallets} 板")
-        res2.metric("節省金額", f"${savings:,} 元")
-        
-        st.write(f"**分析：** 剩餘 {remainder} 板已透過原有車趟消化，成功省下 0.5 趟派車費用。")
+            st.table(pd.DataFrame(table_data, columns=["Index", "路順", "店名", "分段(km)"]))
